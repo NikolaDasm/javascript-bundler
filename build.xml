@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+     JavaScript Bundler
+     Copyright (C) 2016  Nikolay Platov
+ 
+     This program is free software: you can redistribute it and/or modify
+     it under the terms of the GNU General Public License as published by
+     the Free Software Foundation, either version 3 of the License, or
+     (at your option) any later version.
+ 
+     This program is distributed in the hope that it will be useful,
+     but WITHOUT ANY WARRANTY; without even the implied warranty of
+     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+     GNU General Public License for more details.
+ 
+     You should have received a copy of the GNU General Public License
+     along with this program.  If not, see <http://www.gnu.org/licenses/>.
+-->
+<project name="javascript-bundler">
+	<property name="version" value="0.1.0b"/>
+	<property name="src.dir" value="src"/>
+	<property name="build.dir" value="build"/>
+	<property name="src.classes.dir" value="${build.dir}/classes"/>
+	<property name="lib.dir" value="lib"/>
+    <property name="jar.dir" value="${build.dir}/jar"/>
+
+	<property name="classOutputDir" value="build" />
+
+	<property name="main-class" value="nikoladasm.javascript.bundler.Launcher"/>
+
+	<path id='src.compile.classpath'>
+		<fileset dir="${lib.dir}">
+			<include name="*.jar"/>
+		</fileset>
+	</path>
+
+	<target name="clean">
+		<delete dir="${build.dir}"/>
+	</target>
+
+	<target name="compile-src" depends="clean">
+		<mkdir dir="${src.classes.dir}"/>
+		<javac srcdir="${src.dir}"
+			destdir="${src.classes.dir}"
+			includeantruntime="false">
+			<compilerarg line="-parameters"/>
+	        	<classpath refid="src.compile.classpath"/>
+	        </javac>	
+	</target>
+	
+	<target name="jar" depends="compile-src">
+	        <mkdir dir="${jar.dir}"/>
+		<jar destfile="${jar.dir}/${ant.project.name}-${version}.jar" basedir="${src.classes.dir}">
+        	<manifest>
+        		<attribute name="Main-Class" value="${main-class}"/>
+        		<attribute name="Class-Path" value="." />
+        	</manifest>
+       <zipgroupfileset excludes="META-INF/*.MF" dir="${lib.dir}" includes="*.jar" />
+		</jar>
+	</target>
+	
+	<target name="build" depends="jar"/>
+
+</project>
