@@ -52,21 +52,22 @@ import static nikoladasm.javascript.utils.JSUtils.*;
 public class BandlerService {
 
 	private static final String BANDLE_IIFE_HEADER =
-		"(function(moduleMap, cache, mainMod) {\n" +
-		"\"use strict\";\n" +
-		"var module = {};\n";
+		"(function launcher(moduleMap, cache, mainMod) {\n" +
+		"\"use strict\";\n";
 	private static final String BANDLE_IIFE_BODY =
-		"var require = function(mNum){\n" +
+		"function req(mNum){\n" +
 		"if (mNum in cache) {\n" +
 		"return cache[mNum];\n" +
 		"} else if (mNum in moduleMap) {\n" +
-		"var exports = module.exports = {};\n" +
+		"var module = {exports:{}};\n" +
 		"cache[mNum] = {};\n" +
-		"cache[mNum] = moduleMap[mNum](require, exports, module);\n" +
+		"cache[mNum] = moduleMap[mNum].call(module.exports,\n" +
+		"function(n) {return req(n);}, module.exports, module,\n" +
+		"launcher, moduleMap, cache, mainMod);\n" +
 		"return cache[mNum];\n" +
 		"} else throw new Error('Incorrect dependency');\n" +
 		"};\n" +
-		"require(mainMod);\n";
+		"req(mainMod);\n";
 	private static final String BANDLE_IIFE_FOOTER =
 		"})\n";
 	private static final String BANDLE_IIFE_PARAMETERS_HEADER =
@@ -79,7 +80,7 @@ public class BandlerService {
 		"}";
 	private static final String BANDLE_MODULES_CACHE =
 		"{}";
-	private static final String BANDLE_MAP__MODULES_HEADER =
+	private static final String BANDLE_MAP_MODULES_HEADER =
 		"function(require, exports, module) {\n";
 	private static final String BANDLE_MAP_MODULES_FOOTER =
 		"return module.exports;\n}";
@@ -182,7 +183,6 @@ public class BandlerService {
 				String es2015File = readFile(path, UTF_8);
 				es5JSFile = utils.transformES2015toES5(es2015File);
 			}
-			
 			if (!Files.exists(tPath)) Files.createDirectories(tPath);
 			Files.deleteIfExists(tPath);
 			writeFile(es5JSFile, tPath, UTF_8);
@@ -237,7 +237,7 @@ public class BandlerService {
 				int j=1;
 				for (Path path: moduleMap.keySet()) {
 					LOG.debug("Add to bundle: {}",path);
-					bwr.write(moduleMap.get(path)+": "+ BANDLE_MAP__MODULES_HEADER);
+					bwr.write(moduleMap.get(path)+": "+ BANDLE_MAP_MODULES_HEADER);
 					String source = readFile(path, UTF_8);
 					for (Entry<String,Path> entry : cjsDependencies.get(path).entrySet()) {
 						String fArg = entry.getKey();
@@ -258,30 +258,39 @@ public class BandlerService {
 		}
 	}
 	
-	private void compressBundle() {	
+	private void optimizeBundle() {	
 		try {
 			if (!Files.exists(output.getParent())) Files.createDirectories(output.getParent());
-			if ("closure".equalsIgnoreCase(optimize)) {
-				List<String> arguments = new LinkedList<>();
-				arguments.add("--language_in");
-				arguments.add("ECMASCRIPT5_STRICT");
-				arguments.add("--language_out");
-				arguments.add("ECMASCRIPT5_STRICT");
-				arguments.add("--compilation_level");
-				arguments.add(compilation_level);
-				arguments.add("--js");
-				arguments.add(temporyBundlePath.toString());
-				arguments.add("--js_output_file");
-				arguments.add(output.toString());
-				utils.runClousureCompilerOptimizer(arguments.toArray(new String[arguments.size()]));
-			} else {
-				uglifyJS2ScriptEngineStringWriter = new StringWriter();
-				utils.uglifyJS2ScriptEngineStringWriter(uglifyJS2ScriptEngineStringWriter);
-				String minified = utils.optimizeByUglifyJS2Script(readFile(temporyBundlePath, UTF_8), null);
-				Files.deleteIfExists(output);
-				writeFile(minified, output, UTF_8);
-				String capturedOutput = uglifyJS2ScriptEngineStringWriter.toString();
-				if (!capturedOutput.trim().isEmpty()) LOG.debug(capturedOutput);
+			switch(optimize.toLowerCase()) {
+				case "none" : {
+					Files.copy(temporyBundlePath, output, REPLACE_EXISTING);
+					break;
+				}
+				case "closure" : {
+					List<String> arguments = new LinkedList<>();
+					arguments.add("--language_in");
+					arguments.add("ECMASCRIPT5_STRICT");
+					arguments.add("--language_out");
+					arguments.add("ECMASCRIPT5_STRICT");
+					arguments.add("--compilation_level");
+					arguments.add(compilation_level);
+					arguments.add("--js");
+					arguments.add(temporyBundlePath.toString());
+					arguments.add("--js_output_file");
+					arguments.add(output.toString());
+					utils.runClousureCompilerOptimizer(arguments.toArray(new String[arguments.size()]));
+					break;
+				}
+				default : {
+					uglifyJS2ScriptEngineStringWriter = new StringWriter();
+					utils.uglifyJS2ScriptEngineStringWriter(uglifyJS2ScriptEngineStringWriter);
+					String minified = utils.optimizeByUglifyJS2Script(readFile(temporyBundlePath, UTF_8), null);
+					Files.deleteIfExists(output);
+					writeFile(minified, output, UTF_8);
+					String capturedOutput = uglifyJS2ScriptEngineStringWriter.toString();
+					if (!capturedOutput.trim().isEmpty()) LOG.debug(capturedOutput);
+					break;
+				}
 			}
 		} catch (IOException e) {
 			throw new JavaScriptBandlerException("Can't optimize bundle", e);
@@ -311,8 +320,8 @@ public class BandlerService {
 			processCJSDependencies();
 			LOG.info("Building bandle");
 			buildBandle();
-			LOG.info("Compressing bandle");
-			compressBundle();
+			LOG.info("Optimizing bandle");
+			optimizeBundle();
 			if (clearTmpDir) {
 				LOG.info("Clearing temp directory");
 				clearDir(tmpPath);
@@ -320,7 +329,7 @@ public class BandlerService {
 			LOG.info("Bandle successfully created");
 		} catch (Exception e) {
 			if (debug)
-				LOG.error(e.getStackTrace().toString());
+				LOG.error("Bandle did't create.", e);
 			else
 				LOG.error("Bandle did't create.");
 		}
