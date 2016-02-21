@@ -25,6 +25,8 @@ import java.io.StringWriter;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Executors;
@@ -36,6 +38,7 @@ import java.util.regex.Pattern;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedList;
@@ -46,7 +49,8 @@ import nikoladasm.javascript.utils.JSUtils;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.nio.file.StandardCopyOption.REPLACE_EXISTING;
-import static java.nio.file.StandardOpenOption.CREATE;
+import static java.nio.file.StandardOpenOption.*;
+
 import static nikoladasm.javascript.utils.JSUtils.*;
 
 public class BandlerService {
@@ -55,6 +59,36 @@ public class BandlerService {
 		"(function launcher(moduleMap, cache, mainMod) {\n" +
 		"\"use strict\";\n";
 	private static final String BANDLE_IIFE_BODY =
+		"function req(mNum){\n" +
+		"if (mNum in cache) {\n" +
+		"return cache[mNum];\n" +
+		"} else if (mNum in moduleMap) {\n" +
+		"var module = {exports:{}};\n" +
+		"cache[mNum] = {};\n" +
+		"cache[mNum] = moduleMap[mNum].call(module.exports,\n" +
+		"function(n) {return req(n);}, module.exports, module,\n" +
+		"launcher, moduleMap, cache, mainMod);\n" +
+		"return cache[mNum];\n" +
+		"} else throw new Error('Incorrect dependency');\n" +
+		"};\n" +
+		"req(mainMod);\n";
+	private static final String BANDLE_IIFE_BODY_HR =
+		"var hostAndPort = location.hostname+(location.port ? ':'+location.port: '');\n" +
+		"var ws = new WebSocket(\"ws://\"+hostAndPort+\"/modules\");\n" +
+		"ws.onmessage = function (event) {\n" +
+		"var hr = eval(\"(\"+event.data+\")\");\n" +
+		"var newModuleMap = hr.newModuleMap;\n" +
+		"for (var i in hr.moduleMap) {\n" +
+		"newModuleMap[hr.moduleMap[i].to] = moduleMap[hr.moduleMap[i].from];\n" +
+		"}" +
+		"var newCache = {};\n" +
+		"for (var i in hr.cacheMap) {\n" +
+		"newCache[hr.cacheMap[i].to] = cache[hr.cacheMap[i].from];\n" +
+		"}" +
+		"moduleMap = newModuleMap;\n" +
+		"cache = newCache;\n" +
+		"req(mainMod);\n" +
+		"};\n" +
 		"function req(mNum){\n" +
 		"if (mNum in cache) {\n" +
 		"return cache[mNum];\n" +
@@ -99,7 +133,7 @@ public class BandlerService {
 	private Map<Path,Map<String,Path>> cjsDependencies;
 	private Path temporyBundlePath;
 	private Path output;
-	private int period;
+	private int delay;
 	private ScheduledExecutorService service =
 		Executors.newSingleThreadScheduledExecutor();
 	private StringWriter babelScriptEngineStringWriter;
@@ -108,6 +142,20 @@ public class BandlerService {
 	private boolean clearTmpDir;
 	private String optimize;
 	private String compilation_level;
+	private Map<Path, byte[]> sourceHashes = new HashMap<>();
+	private Map<Path, byte[]> transformedSourceHashes = new HashMap<>();
+	private boolean transformationOnlyChanged;
+	private boolean sourceFilesChanged;
+	private MessageDigest digest;
+	private boolean hotReload;
+	private boolean bundleBuilded;
+	private Set<Path> changedModules = new HashSet<>();
+	private Map<Path,Map<String,Path>> previousCjsDependencies;
+	private Map<Path,Integer> previousModulesMap;
+	private String ipAddress;
+	private int port;
+	private String staticFileLocation;
+	private WebSocketService wsService;
 	
 	public BandlerService(Config config) {
 		readConfig(config);
@@ -126,11 +174,16 @@ public class BandlerService {
 			(config.excludedFromTransformationDirs == null) ?
 			new LinkedList<>()	: config.excludedFromTransformationDirs;
 		output = basePath.resolve(config.output).toAbsolutePath().normalize();
-		period = config.period;
+		delay = config.delay;
 		debug = config.debug;
 		clearTmpDir = config.clearTmpDir;
 		optimize = config.optimize;
 		compilation_level = config.compilation_level;
+		transformationOnlyChanged = config.transformationOnlyChanged;
+		hotReload = config.hotReload && "none".equalsIgnoreCase(optimize);
+		ipAddress = config.ipAddress;
+		port = config.port;
+		staticFileLocation = config.staticFileLocation;
 	}
 	
 	private void setLoggerProperty() {
@@ -146,7 +199,8 @@ public class BandlerService {
 	
 	private Path changeJSXtoJSExtension(Path originalPath) {
 		String originalPathStr = originalPath.toString();
-		return Paths.get(originalPathStr.substring(0, originalPathStr.length()-4)+".js");
+		return Paths.get(originalPathStr.substring(
+			0, originalPathStr.length()-JSX_FILE_EXTENSION.length())+JS_FILE_EXTENSION);
 	}
 
 	private Set<Path> getExcludedPaths() {
@@ -167,31 +221,78 @@ public class BandlerService {
 		}
 		return excludesPaths;
 	}
+	
+	private MessageDigest digest() throws NoSuchAlgorithmException {
+		if (digest != null) return digest;
+		digest = MessageDigest.getInstance("SHA-256");
+		return digest;
+	}
 
+	private byte[] stringHash(String source) {
+		try {
+			digest().reset();
+			return digest().digest(source.getBytes(UTF_8));
+		} catch (NoSuchAlgorithmException e) {
+			return null;
+		}
+	}
+	
+	private String readFileWithCheckFilesChange(Path path, Path tPath) throws IOException {
+		if (!sourceHashes.containsKey(path) ||
+			!transformedSourceHashes.containsKey(tPath)) return null;
+		try {
+			String source = readFile(path, UTF_8);
+			digest().reset();
+			byte[] sHash = digest().digest(source.getBytes(UTF_8));
+			source = readFile(tPath, UTF_8);
+			digest().reset();
+			byte[] tHash = digest().digest(source.getBytes(UTF_8));
+			if (!Arrays.equals(sourceHashes.get(path), sHash) ||
+				!Arrays.equals(transformedSourceHashes.get(tPath),tHash)) return null;
+			return source;
+		} catch (NoSuchAlgorithmException | IOException e) {
+			return null;
+		}
+	}
+	
 	private String readFileWithTransformationAndWrite(Path path) throws IOException {
 		LOG.debug("Resolve dependencies: {}",path);
 		Path rpath = basePath.toAbsolutePath().relativize(path);
 		Path tPath = tmpPath.resolve(rpath).toAbsolutePath().normalize();
+		if (path.toString().endsWith(JSX_FILE_EXTENSION))
+			tPath = changeJSXtoJSExtension(tPath);
+		String unchangedJSFile = readFileWithCheckFilesChange(path, tPath);
+		if (unchangedJSFile != null) {
+			LOG.debug("Not changed. Skip: {}",path);
+			return unchangedJSFile;
+		}
+		sourceFilesChanged = true;
+		changedModules.add(tPath);
 		String es5JSFile;
 		if (!getExcludedPaths().contains(path)) {
 			LOG.debug("Transformation: {}",path);
 			if (path.toString().endsWith(JSX_FILE_EXTENSION)) {
-				tPath = changeJSXtoJSExtension(tPath);
 				String jsxFile = readFile(path, UTF_8);
+				sourceHashes.put(path, stringHash(jsxFile));
 				es5JSFile = utils.transformJSXAndES2015toES5(jsxFile);
 			} else {
 				String es2015File = readFile(path, UTF_8);
+				sourceHashes.put(path, stringHash(es2015File));
 				es5JSFile = utils.transformES2015toES5(es2015File);
 			}
 			if (!Files.exists(tPath)) Files.createDirectories(tPath);
 			Files.deleteIfExists(tPath);
 			writeFile(es5JSFile, tPath, UTF_8);
+			transformedSourceHashes.put(tPath, stringHash(es5JSFile));
 		} else {
 			LOG.debug("Coping: {}",path);
 			if (!Files.exists(tPath)) Files.createDirectories(tPath);
 			Files.deleteIfExists(tPath);
 			Files.copy(path, tPath, REPLACE_EXISTING);
 			es5JSFile = readFile(path, UTF_8);
+			byte[] hash = stringHash(es5JSFile);
+			sourceHashes.put(path, hash);
+			transformedSourceHashes.put(tPath, hash);
 		}
 		if (path.equals(rootModule)) rootModule = tPath;
 		es5DependenciesPathsMap.put(path, tPath);
@@ -200,6 +301,8 @@ public class BandlerService {
 	
 	private void processCJSDependencies() {
 		rootModule = topModule;
+		sourceFilesChanged = false;
+		changedModules.clear();
 		utils.setCJSResolverFileReader(this::readFileWithTransformationAndWrite);
 		babelScriptEngineStringWriter = new StringWriter();
 		utils.babelScriptEngineStringWriter(babelScriptEngineStringWriter);
@@ -215,14 +318,88 @@ public class BandlerService {
 		});
 	}
 	
+	private boolean isModuleChahged(Path path, Set<Path> checkedModules, Set<Path> changedModules) {
+		if (changedModules.contains(path)) return true;
+		if (checkedModules.contains(path)) return false;
+		checkedModules.add(path);
+		if (this.changedModules.contains(path) ||
+			!cjsDependencies.containsKey(path)) {
+			changedModules.add(path);
+			return true;
+		}
+		for (Entry<String,Path> entry : previousCjsDependencies.get(path).entrySet())
+			if (isModuleChahged(entry.getValue(), checkedModules, changedModules)) return true;
+		return false;
+	}
+	
+	private Set<Path> getUnchangedModules() {
+		Set<Path> unchanged = new HashSet<>();
+		Set<Path> checkedModules = new HashSet<>();
+		Set<Path> changedModules = new HashSet<>();
+		for (Path path : previousCjsDependencies.keySet()) {
+			checkedModules.clear();
+			if (!isModuleChahged(path, checkedModules, changedModules)) unchanged.add(path);
+		}
+		return unchanged;
+	}
+	
 	private void buildBandle() {
-		temporyBundlePath = tmpPath.resolve(UUID.randomUUID().toString()+".bandle.tmp").toAbsolutePath().normalize();
-		Map<Path,Integer> moduleMap = new HashMap<>();
+		if (!sourceFilesChanged) {
+			LOG.debug("Source files not changed. Bundle build skipped");
+			return;
+		}
+		
+		Set<Path> unchangedModules = null;
+		if (bundleBuilded)
+			unchangedModules = getUnchangedModules();
+		previousCjsDependencies = cjsDependencies;
+
+		temporyBundlePath = tmpPath.resolve(UUID.randomUUID().toString()+".bandle.tmp.js").toAbsolutePath().normalize();
+		Map<Path,Integer> modulesMap = new HashMap<>();
 		int i = 1;
 		for (Path path: cjsDependencies.keySet()) {
-			moduleMap.put(path, i);
+			modulesMap.put(path, i);
 			i++;
 		}
+		StringBuffer hotReloadData = new StringBuffer();
+		Set<Path> modulesForLinking = new HashSet<>();
+		if (bundleBuilded) {
+			for (Path path : modulesMap.keySet())
+				if (!changedModules.contains(path)) modulesForLinking.add(path);
+			hotReloadData
+				.append("{\n")
+				.append("cacheMap :\n")
+				.append("[\n");
+			int j = 1;
+			for (Path path : unchangedModules) {
+				hotReloadData
+					.append("{")
+					.append("to : ").append(modulesMap.get(path)).append(", ")
+					.append("from : ").append(previousModulesMap.get(path))
+					.append("}")
+					.append((j < unchangedModules.size()) ? ",\n" : "\n");
+				j++;
+			}
+			hotReloadData
+				.append("],\n")
+				.append("moduleMap :\n")
+				.append("[\n");
+			j = 1;
+			for (Path path : modulesForLinking) {
+				hotReloadData
+					.append("{")
+					.append("to : ").append(modulesMap.get(path)).append(", ")
+					.append("from : ").append(previousModulesMap.get(path))
+					.append("}")
+					.append((j < modulesForLinking.size()) ? ",\n" : "\n");
+				j++;
+			}
+			hotReloadData
+				.append("],\n")
+				.append("newModuleMap :\n");
+		}
+		previousModulesMap = modulesMap;
+		
 		try {
 			if (!Files.exists(temporyBundlePath)) Files.createDirectories(temporyBundlePath);
 			Files.deleteIfExists(temporyBundlePath);
@@ -230,28 +407,48 @@ public class BandlerService {
 					new OutputStreamWriter(
 						Files.newOutputStream(temporyBundlePath, CREATE), UTF_8))) {
 				bwr.write(BANDLE_IIFE_HEADER);
-				bwr.write(BANDLE_IIFE_BODY);
+				if (hotReload)
+					bwr.write(BANDLE_IIFE_BODY_HR);
+				else
+					bwr.write(BANDLE_IIFE_BODY);
 				bwr.write(BANDLE_IIFE_FOOTER);
 				bwr.write(BANDLE_IIFE_PARAMETERS_HEADER);
 				bwr.write(BANDLE_MAP_HEADER);
+				hotReloadData.append(BANDLE_MAP_HEADER);
 				int j=1;
-				for (Path path: moduleMap.keySet()) {
+				int k=1;
+				for (Path path: modulesMap.keySet()) {
 					LOG.debug("Add to bundle: {}",path);
-					bwr.write(moduleMap.get(path)+": "+ BANDLE_MAP_MODULES_HEADER);
+					bwr.write(modulesMap.get(path)+": "+ BANDLE_MAP_MODULES_HEADER);
+					if (!modulesForLinking.contains(path))
+						hotReloadData.append(modulesMap.get(path)+": "+ BANDLE_MAP_MODULES_HEADER);
 					String source = readFile(path, UTF_8);
 					for (Entry<String,Path> entry : cjsDependencies.get(path).entrySet()) {
 						String fArg = entry.getKey();
 						Path fPath = entry.getValue();
-						source = source.replaceAll("(require\\s*\\(\\s*)['\"]"+Pattern.quote(fArg)+"['\"](\\s*\\))", "$1"+moduleMap.get(fPath).toString()+"$2");
+						source = source.replaceAll("(require\\s*\\(\\s*)['\"]"+Pattern.quote(fArg)+"['\"](\\s*\\))", "$1"+modulesMap.get(fPath).toString()+"$2");
 					}
 					bwr.write(source);
-					bwr.write(BANDLE_MAP_MODULES_FOOTER+((j < moduleMap.size()) ? ",\n" : "\n"));
+					if (!modulesForLinking.contains(path))
+						hotReloadData.append(source);
+					bwr.write(BANDLE_MAP_MODULES_FOOTER+((j < modulesMap.size()) ? ",\n" : "\n"));
+					if (!modulesForLinking.contains(path)) {
+						hotReloadData.append(BANDLE_MAP_MODULES_FOOTER+((k < (modulesMap.size()-modulesForLinking.size())) ? ",\n" : "\n"));
+						k++;
+						}
 					j++;
 				}
 				bwr.write(BANDLE_MAP_FOOTER);
+				hotReloadData
+					.append(BANDLE_MAP_FOOTER)
+					.append("}\n");
 				bwr.write(","+BANDLE_MODULES_CACHE);
-				bwr.write(","+moduleMap.get(rootModule.toAbsolutePath()));
+				bwr.write(","+modulesMap.get(rootModule.toAbsolutePath()));
 				bwr.write(BANDLE_IIFE_PARAMETERS_FOOTER);
+			}
+			if (bundleBuilded) {
+				LOG.info("hotReload write");
+				wsService.send(hotReloadData.toString());
 			}
 		} catch (IOException e) {
 			throw new JavaScriptBandlerException("Can't create bundle", e);
@@ -259,6 +456,10 @@ public class BandlerService {
 	}
 	
 	private void optimizeBundle() {	
+		if (!sourceFilesChanged) {
+			LOG.debug("Source files not changed. Bundle optimize skipped");
+			return;
+		}
 		try {
 			if (!Files.exists(output.getParent())) Files.createDirectories(output.getParent());
 			switch(optimize.toLowerCase()) {
@@ -292,6 +493,7 @@ public class BandlerService {
 					break;
 				}
 			}
+			if (hotReload) bundleBuilded = true;
 		} catch (IOException e) {
 			throw new JavaScriptBandlerException("Can't optimize bundle", e);
 		}
@@ -313,6 +515,18 @@ public class BandlerService {
 		} catch (IOException e) {}
 	}
 	
+	private void clearTmpFiles(Path path) {
+		try {
+			if (Files.exists(path) && Files.isDirectory(path)) { 
+				Files.walk(path)
+					.filter(Files::isRegularFile)
+					.filter(p -> p.toString().endsWith(".bandle.tmp.js"))
+					.map(Path::toFile)
+					.forEach(f -> f.delete());
+			}
+		} catch (IOException e) {}
+	}
+	
 	public void bandle() {
 		try{
 			LOG.info("Creating bandle...");
@@ -322,7 +536,9 @@ public class BandlerService {
 			buildBandle();
 			LOG.info("Optimizing bandle");
 			optimizeBundle();
-			if (clearTmpDir) {
+			LOG.info("Clearing temp bundle files");
+			clearTmpFiles(tmpPath);
+			if (clearTmpDir && !transformationOnlyChanged) {
 				LOG.info("Clearing temp directory");
 				clearDir(tmpPath);
 			}
@@ -336,9 +552,11 @@ public class BandlerService {
 	}
 	
 	public void runPeriodicBandleBuilder() {
+		wsService = new WebSocketService(ipAddress, port, staticFileLocation, LOG);
+		wsService.start();
 		service.scheduleWithFixedDelay(() -> {
 			bandle();
-		}, 0, period, TimeUnit.SECONDS);
+		}, 0, delay, TimeUnit.SECONDS);
 	}
 	
 	public void stopPeriodicBandleBuilder() {
@@ -355,5 +573,6 @@ public class BandlerService {
 		} catch (InterruptedException e) {
 			service.shutdownNow();
 		}
+		wsService.stop();
 	}
 }

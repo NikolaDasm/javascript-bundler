@@ -48,9 +48,9 @@ public class Config {
 	@Property("output")
 	public Path output;
 	
-	@Property("period")
+	@Property("delay")
 	@DefaultValue("5")
-	public int period;
+	public int delay;
 	
 	@Property("debug")
 	@DefaultValue("false")
@@ -67,4 +67,24 @@ public class Config {
 	@Property("closure.compilation_level")
 	@DefaultValue("SIMPLE")
 	public String compilation_level;
+	
+	@Property("transformation.only.changed")
+	@DefaultValue("true")
+	public boolean transformationOnlyChanged;
+	
+	@Property("hot.reload")
+	@DefaultValue("false")
+	public boolean hotReload;
+
+	@Property("server.ipaddress")
+	@DefaultValue("0.0.0.0")
+	public String ipAddress;
+	
+	@Property("server.port")
+	@DefaultValue("8080")
+	public int port;
+	
+	@Property("server.static.file.location")
+	@DefaultValue("resources/public")
+	public String staticFileLocation;
 }
