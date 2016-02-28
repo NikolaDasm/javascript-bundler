@@ -73,9 +73,10 @@ public class BandlerService {
 		"};\n" +
 		"req(mainMod);\n";
 	private static final String BANDLE_IIFE_BODY_HR =
-		"var hostAndPort = location.hostname+(location.port ? ':'+location.port: '');\n" +
+		"var hostAndPort = location.hostname+(location.port ? ':'+(parseInt(location.port)+1) : ':'+81);\n" +
 		"var ws = new WebSocket(\"ws://\"+hostAndPort+\"/modules\");\n" +
 		"ws.onmessage = function (event) {\n" +
+		"console.log('modules reloaded');" +
 		"var hr = eval(\"(\"+event.data+\")\");\n" +
 		"var newModuleMap = hr.newModuleMap;\n" +
 		"for (var i in hr.moduleMap) {\n" +
@@ -87,7 +88,9 @@ public class BandlerService {
 		"}" +
 		"moduleMap = newModuleMap;\n" +
 		"cache = newCache;\n" +
+		"try {" +
 		"req(mainMod);\n" +
+		"} catch(e) {console.log(e);}" +
 		"};\n" +
 		"function req(mNum){\n" +
 		"if (mNum in cache) {\n" +
@@ -156,6 +159,9 @@ public class BandlerService {
 	private int port;
 	private String staticFileLocation;
 	private WebSocketService wsService;
+	private boolean jsHintEnableAnalyze;
+	private String jsHintOptions;
+	private String[] babelAdditionalPresets;
 	
 	public BandlerService(Config config) {
 		readConfig(config);
@@ -184,6 +190,17 @@ public class BandlerService {
 		ipAddress = config.ipAddress;
 		port = config.port;
 		staticFileLocation = config.staticFileLocation;
+		jsHintEnableAnalyze = config.jsHintEnableAnalyze;
+		if (jsHintEnableAnalyze) {
+			Map<String,String> opts = config.jsHintOptions;
+			StringBuffer sb = new StringBuffer();
+			sb.append("{");
+			opts.forEach((key, value) ->
+				sb.append(key).append(" : ").append(value));
+			sb.append("}");
+			jsHintOptions = sb.toString();
+		}
+		babelAdditionalPresets = config.babelAdditionalPresets;
 	}
 	
 	private void setLoggerProperty() {
@@ -264,6 +281,7 @@ public class BandlerService {
 		String unchangedJSFile = readFileWithCheckFilesChange(path, tPath);
 		if (unchangedJSFile != null) {
 			LOG.debug("Not changed. Skip: {}",path);
+			if (path.equals(rootModule)) rootModule = tPath;
 			return unchangedJSFile;
 		}
 		sourceFilesChanged = true;
@@ -274,11 +292,24 @@ public class BandlerService {
 			if (path.toString().endsWith(JSX_FILE_EXTENSION)) {
 				String jsxFile = readFile(path, UTF_8);
 				sourceHashes.put(path, stringHash(jsxFile));
-				es5JSFile = utils.transformJSXAndES2015toES5(jsxFile);
+				if (jsHintEnableAnalyze) {
+					String es2015JSFile = utils.transformJSXtoJS(jsxFile);
+					String analyzeResult = utils.staticAnalyzeByJSHintScript(es2015JSFile, jsHintOptions, null);
+					if (analyzeResult.trim().isEmpty()) analyzeResult =  "File has no error";
+					LOG.info("Analyze result: \n {}", analyzeResult);
+					es5JSFile = utils.transformES2015toES5(es2015JSFile, babelAdditionalPresets);
+				} else {
+					es5JSFile = utils.transformJSXAndES2015toES5(jsxFile, babelAdditionalPresets);
+				}
 			} else {
-				String es2015File = readFile(path, UTF_8);
-				sourceHashes.put(path, stringHash(es2015File));
-				es5JSFile = utils.transformES2015toES5(es2015File);
+				String es2015JSFile = readFile(path, UTF_8);
+				sourceHashes.put(path, stringHash(es2015JSFile));
+				if (jsHintEnableAnalyze) {
+					String analyzeResult = utils.staticAnalyzeByJSHintScript(es2015JSFile, jsHintOptions, null);
+					if (analyzeResult.trim().isEmpty()) analyzeResult =  "File has no error";
+					LOG.info("Analyze result: \n {}", analyzeResult);
+				}
+				es5JSFile = utils.transformES2015toES5(es2015JSFile, babelAdditionalPresets);
 			}
 			if (!Files.exists(tPath)) Files.createDirectories(tPath);
 			Files.deleteIfExists(tPath);
@@ -544,6 +575,7 @@ public class BandlerService {
 			}
 			LOG.info("Bandle successfully created");
 		} catch (Exception e) {
+			transformedSourceHashes.clear();
 			if (debug)
 				LOG.error("Bandle did't create.", e);
 			else

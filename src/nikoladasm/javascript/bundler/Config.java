@@ -22,6 +22,7 @@ import static nikoladasm.commons.configuration.properties.annotations.Resource.T
 
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
 
 import nikoladasm.commons.configuration.properties.annotations.*;
 
@@ -87,4 +88,14 @@ public class Config {
 	@Property("server.static.file.location")
 	@DefaultValue("resources/public")
 	public String staticFileLocation;
+	
+	@Property("jshint.enable.analyze")
+	@DefaultValue("true")
+	public boolean jsHintEnableAnalyze;
+	
+	@Property("jshint.options")
+	public Map<String,String> jsHintOptions;
+	
+	@Property("babel.additional.presets")
+	public String[] babelAdditionalPresets;
 }

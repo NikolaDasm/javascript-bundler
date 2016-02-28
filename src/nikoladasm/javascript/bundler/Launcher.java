@@ -27,13 +27,29 @@ public class Launcher {
 	public static void main(String[] args) {
 		Config config = PropertyLoader.getInstance().populate(Config.class);
 		BandlerService service = new BandlerService(config);
-		service.runPeriodicBandleBuilder();
-		System.out.println("Bandler run");
-		Console console = System.console();
-		System.out.println("Enter \"x\" for exit");
-		try {
-			while (!console.readLine().trim().equalsIgnoreCase("x"));
-		} catch (Exception e) {}
-		service.stopPeriodicBandleBuilder();
+		if (args.length == 1) {
+			switch(args[0].toLowerCase()) {
+				case "-service" :
+				case "-s" : {
+					service.runPeriodicBandleBuilder();
+					System.out.println("Bandler service run");
+					Console console = System.console();
+					System.out.println("Enter \"x\" for exit");
+					try {
+						while (!console.readLine().trim().equalsIgnoreCase("x"));
+					} catch (Exception e) {}
+					service.stopPeriodicBandleBuilder();
+					break;
+				}
+				case "-bundle" :
+				case "-b" :
+				default : {
+					service.bandle();
+					break;
+				}
+			}
+		} else {
+			service.bandle();
+		}
 	}
 }

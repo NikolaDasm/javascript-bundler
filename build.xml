@@ -17,7 +17,7 @@
      along with this program.  If not, see <http://www.gnu.org/licenses/>.
 -->
 <project name="javascript-bundler">
-	<property name="version" value="0.1.2b"/>
+	<property name="version" value="0.1.3b"/>
 	<property name="src.dir" value="src"/>
 	<property name="build.dir" value="build"/>
 	<property name="src.classes.dir" value="${build.dir}/classes"/>
